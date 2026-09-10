@@ -12,6 +12,8 @@ const FOREX_PAIRS = {
 
 const COMMODITY_PAIRS = {
   'GOLD OTC': 'XAU/USD',
+  'SILVER OTC': 'XAG/USD',
+  'OIL OTC': 'WTI/USD',
 }
 
 const CRYPTO_PAIRS = {
@@ -24,119 +26,115 @@ const TIMEFRAMES = ['1', '3', '5', '15']
 const TF_TO_TWELVEDATA = { '1': '1min', '3': '3min', '5': '5min', '15': '15min' }
 const TF_TO_BINANCE = { '1': '1m', '3': '3m', '5': '5m', '15': '15m' }
 
-// --- Indicator math ---
+// --- ICT / SMC Engine ---
 
-function ema(values, period) {
-  const k = 2 / (period + 1)
-  const out = [values[0]]
-  for (let i = 1; i < values.length; i++) {
-    out.push(values[i] * k + out[i - 1] * (1 - k))
+function getSwings(candles, l=3, r=3) {
+  const highs=[], lows=[]
+  for(let i=l; i<candles.length-r; i++){
+    let sh=true, sl=true
+    for(let j=1;j<=l;j++){
+      if(candles[i-j].high > candles[i].high || candles[i+j].high > candles[i].high) sh=false
+      if(candles[i-j].low < candles[i].low || candles[i+j].low < candles[i].low) sl=false
+    }
+    if(sh) highs.push({i, price:candles[i].high})
+    if(sl) lows.push({i, price:candles[i].low})
   }
-  return out
+  return {highs, lows}
 }
 
-function rsi(values, period = 14) {
-  const out = new Array(values.length).fill(50)
-  let gains = 0
-  let losses = 0
-  for (let i = 1; i <= period; i++) {
-    const diff = values[i] - values[i - 1]
-    if (diff >= 0) gains += diff
-    else losses -= diff
-  }
-  let avgGain = gains / period
-  let avgLoss = losses / period
-  out[period] = 100 - 100 / (1 + avgGain / (avgLoss || 1e-9))
-  for (let i = period + 1; i < values.length; i++) {
-    const diff = values[i] - values[i - 1]
-    const gain = diff > 0 ? diff : 0
-    const loss = diff < 0 ? -diff : 0
-    avgGain = (avgGain * (period - 1) + gain) / period
-    avgLoss = (avgLoss * (period - 1) + loss) / period
-    out[i] = 100 - 100 / (1 + avgGain / (avgLoss || 1e-9))
-  }
-  return out
+function getMarketStructure(candles){
+  const {highs, lows} = getSwings(candles)
+  if(highs.length<2 || lows.length<2) return {bias:'NEUTRAL', reason:'Not enough structure'}
+  const lh1=highs[highs.length-2], lh2=highs[highs.length-1]
+  const ll1=lows[lows.length-2], ll2=lows[lows.length-1]
+  // PD Array bias
+  if(lh2.price > lh1.price && ll2.price > ll1.price) return {bias:'BULLISH', reason:'HH + HL - Market Structure Bullish'}
+  if(lh2.price < lh1.price && ll2.price < ll1.price) return {bias:'BEARISH', reason:'LH + LL - Market Structure Bearish'}
+  // BOS / CHoCH check on last 20
+  const recent=candles.slice(-20)
+  const maxH=Math.max(...recent.map(c=>c.high))
+  const minL=Math.min(...recent.map(c=>c.low))
+  const lastClose=candles[candles.length-1].close
+  if(lastClose > maxH) return {bias:'BULLISH', reason:'BOS up - price broke structure'}
+  if(lastClose < minL) return {bias:'BEARISH', reason:'BOS down - price broke structure'}
+  return {bias:'NEUTRAL', reason:'Ranging - no clear PD array bias'}
 }
 
-function engulfingPattern(candles) {
-  const n = candles.length
-  if (n < 2) return null
-  const prev = candles[n - 2]
-  const curr = candles[n - 1]
-  const prevBearish = prev.close < prev.open
-  const currBullish = curr.close > curr.open
-  if (prevBearish && currBullish && curr.close > prev.open && curr.open < prev.close) return 'bullish'
-  const prevBullish = prev.close > prev.open
-  const currBearish = curr.close < curr.open
-  if (prevBullish && currBearish && curr.close < prev.open && curr.open > prev.close) return 'bearish'
+function findOrderBlock(candles){
+  for(let i=candles.length-2; i>=Math.max(0,candles.length-20); i--){
+    const curr=candles[i+1], prev=candles[i]
+    const bullImp = curr.close > curr.open && (curr.close-curr.open) > (curr.high-curr.low)*0.55
+    const bearImp = curr.close < curr.open && (curr.open-curr.close) > (curr.high-curr.low)*0.55
+    if(bullImp && prev.close < prev.open) return {type:'BULLISH', top:prev.high, bottom:prev.low, idx:i}
+    if(bearImp && prev.close > prev.open) return {type:'BEARISH', top:prev.high, bottom:prev.low, idx:i}
+  }
   return null
 }
 
-function scoreSignal(candles) {
-  const closes = candles.map((c) => c.close)
-  const rsiSeries = rsi(closes, 14)
-  const ema9 = ema(closes, 9)
-  const ema21 = ema(closes, 21)
-
-  const lastRsi = rsiSeries[rsiSeries.length - 1]
-  const lastEma9 = ema9[ema9.length - 1]
-  const lastEma21 = ema21[ema21.length - 1]
-  const prevEma9 = ema9[ema9.length - 2]
-  const prevEma21 = ema21[ema21.length - 2]
-  const pattern = engulfingPattern(candles)
-
-  let bullPoints = 0
-  let bearPoints = 0
-  const reasons = []
-
-  if (lastRsi < 30) {
-    bullPoints++
-    reasons.push('RSI oversold (<30)')
-  } else if (lastRsi > 70) {
-    bearPoints++
-    reasons.push('RSI overbought (>70)')
+function findFVG(candles){
+  for(let i=candles.length-1; i>=2; i--){
+    const c1=candles[i-2], c3=candles[i]
+    if(c1.high < c3.low) return {type:'BULLISH', top:c3.low, bottom:c1.high}
+    if(c1.low > c3.high) return {type:'BEARISH', top:c1.low, bottom:c3.high}
   }
-
-  const crossedUp = prevEma9 <= prevEma21 && lastEma9 > lastEma21
-  const crossedDown = prevEma9 >= prevEma21 && lastEma9 < lastEma21
-  if (crossedUp) {
-    bullPoints++
-    reasons.push('EMA9 crossed above EMA21')
-  } else if (crossedDown) {
-    bearPoints++
-    reasons.push('EMA9 crossed below EMA21')
-  } else if (lastEma9 > lastEma21) {
-    bullPoints += 0.5
-    reasons.push('EMA9 above EMA21 (uptrend)')
-  } else {
-    bearPoints += 0.5
-    reasons.push('EMA9 below EMA21 (downtrend)')
-  }
-
-  if (pattern === 'bullish') {
-    bullPoints++
-    reasons.push('Bullish engulfing candle')
-  } else if (pattern === 'bearish') {
-    bearPoints++
-    reasons.push('Bearish engulfing candle')
-  }
-
-  let direction = 'NONE'
-  let confidence = 0
-  const maxPoints = 3
-
-  if (bullPoints >= 1 && bullPoints > bearPoints) {
-    direction = 'CALL'
-    confidence = Math.min(95, Math.round((bullPoints / maxPoints) * 100))
-  } else if (bearPoints >= 1 && bearPoints > bullPoints) {
-    direction = 'PUT'
-    confidence = Math.min(95, Math.round((bearPoints / maxPoints) * 100))
-  }
-
-  return { direction, confidence, reasons }
+  return null
 }
 
-// --- Data fetching ---
+function findLiquiditySweep(candles){
+  const {highs, lows} = getSwings(candles)
+  if(!highs.length ||!lows.length) return null
+  const lastH=highs[highs.length-1], lastL=lows[lows.length-1]
+  const c=candles[candles.length-1], p=candles[candles.length-2]
+  if(p.high > lastH.price && c.close < lastH.price) return {type:'BEARISH', level:lastH.price, name:'Sell-side liquidity sweep'}
+  if(p.low < lastL.price && c.close > lastL.price) return {type:'BULLISH', level:lastL.price, name:'Buy-side liquidity sweep'}
+  return null
+}
+
+function volumeConfirm(candles){
+  // TwelveData/Binance both return volume sometimes, fallback to range expansion
+  const ranges=candles.slice(-20).map(c=>c.high-c.low)
+  const avg=ranges.reduce((a,b)=>a+b,0)/ranges.length
+  const lastR=candles[candles.length-1].high-candles[candles.length-1].low
+  return lastR > avg*1.3
+}
+
+function scoreSignal(candles) {
+  const ms = getMarketStructure(candles)
+  const reasons=[ms.reason]
+  if(ms.bias==='NEUTRAL') return {direction:'NONE', confidence:0, reasons:[...reasons,'No trade - wait for structure']}
+
+  const ob = findOrderBlock(candles)
+  const fvg = findFVG(candles)
+  const liq = findLiquiditySweep(candles)
+  const vol = volumeConfirm(candles)
+
+  let points=0
+  // Only count confluences in direction of MS bias
+  if(ob && ob.type===ms.bias){
+    points+=2; reasons.push(`${ob.type} Order Block at ${ob.top.toFixed(5)}-${ob.bottom.toFixed(5)}`)
+  }
+  if(fvg && fvg.type===ms.bias){
+    points+=1.5; reasons.push(`${fvg.type} FVG ${fvg.bottom.toFixed(5)}-${fvg.top.toFixed(5)}`)
+  }
+  if(liq && liq.type===ms.bias){
+    points+=1.5; reasons.push(liq.name)
+  } else if(liq){
+    points-=1; reasons.push(`Opposing liquidity - caution`)
+  }
+  if(vol){ points+=1; reasons.push('Volume / range expansion confirms impulse') }
+
+  let direction='NONE', confidence=0
+  if(ms.bias==='BULLISH' && points>=2.5){
+    direction='CALL'; confidence=Math.min(95, Math.round(55 + points*8))
+  } else if(ms.bias==='BEARISH' && points>=2.5){
+    direction='PUT'; confidence=Math.min(95, Math.round(55 + points*8))
+  } else {
+    reasons.push('Not enough ICT confluence in bias direction')
+  }
+  return {direction, confidence, reasons}
+}
+
+// --- Data fetching (unchanged, works for Forex + Commodities + Crypto) ---
 
 async function fetchForexCandles(symbol, tf) {
   const interval = TF_TO_TWELVEDATA[tf] || '1min'
@@ -147,14 +145,14 @@ async function fetchForexCandles(symbol, tf) {
   const data = await res.json()
   if (!data.values) throw new Error(data.message || 'Twelve Data error')
   return data.values
-    .map((v) => ({
+   .map((v) => ({
       open: parseFloat(v.open),
       high: parseFloat(v.high),
       low: parseFloat(v.low),
       close: parseFloat(v.close),
       time: new Date(v.datetime).getTime(),
     }))
-    .reverse()
+   .reverse()
 }
 
 async function fetchCryptoCandles(symbol, tf) {
@@ -171,7 +169,7 @@ async function fetchCryptoCandles(symbol, tf) {
   }))
 }
 
-// --- Components ---
+// --- Components (unchanged) ---
 
 function Auth() {
   const [isLogin, setIsLogin] = useState(true)
@@ -198,38 +196,24 @@ function Auth() {
   return (
     <div style={{ maxWidth: 400, margin: '80px auto', padding: 20, fontFamily: 'sans-serif' }}>
       <h1>GroWiz OTC</h1>
-      <h2>{isLogin ? 'Login' : 'Sign Up'}</h2>
+      <h2>{isLogin? 'Login' : 'Sign Up'}</h2>
       <form onSubmit={handleSubmit}>
-        <input
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          required
-          style={{ width: '100%', padding: 10, marginBottom: 10 }}
-        />
-        <input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          required
-          style={{ width: '100%', padding: 10, marginBottom: 10 }}
-        />
+        <input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required style={{ width: '100%', padding: 10, marginBottom: 10 }} />
+        <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required style={{ width: '100%', padding: 10, marginBottom: 10 }} />
         <button type="submit" disabled={loading} style={{ width: '100%', padding: 10 }}>
-          {loading ? 'Please wait...' : isLogin ? 'Login' : 'Sign Up'}
+          {loading? 'Please wait...' : isLogin? 'Login' : 'Sign Up'}
         </button>
       </form>
       {message && <p style={{ marginTop: 10 }}>{message}</p>}
       <p style={{ marginTop: 20, cursor: 'pointer', color: 'blue' }} onClick={() => setIsLogin(!isLogin)}>
-        {isLogin ? "Don't have an account? Sign up" : 'Already have an account? Login'}
+        {isLogin? "Don't have an account? Sign up" : 'Already have an account? Login'}
       </p>
     </div>
   )
 }
 
 function SignalGenerator({ userId }) {
-  const allPairs = { ...FOREX_PAIRS, ...COMMODITY_PAIRS, ...CRYPTO_PAIRS }
+  const allPairs = {...FOREX_PAIRS,...COMMODITY_PAIRS,...CRYPTO_PAIRS }
   const [broker, setBroker] = useState(BROKERS[0])
   const [pair, setPair] = useState(Object.keys(allPairs)[0])
   const [timeframe, setTimeframe] = useState('1')
@@ -243,10 +227,9 @@ function SignalGenerator({ userId }) {
     setResult(null)
     try {
       let candles
-      if (FOREX_PAIRS[pair]) {
-        candles = await fetchForexCandles(FOREX_PAIRS[pair], timeframe)
-      } else if (COMMODITY_PAIRS[pair]) {
-        candles = await fetchForexCandles(COMMODITY_PAIRS[pair], timeframe)
+      if (FOREX_PAIRS[pair] || COMMODITY_PAIRS[pair]) {
+        const sym = FOREX_PAIRS[pair] || COMMODITY_PAIRS[pair]
+        candles = await fetchForexCandles(sym, timeframe)
       } else {
         candles = await fetchCryptoCandles(CRYPTO_PAIRS[pair], timeframe)
       }
@@ -257,8 +240,6 @@ function SignalGenerator({ userId }) {
       }
       const scored = scoreSignal(candles)
       setResult(scored)
-
-      // Save to Supabase
       await supabase.from('signals').insert({
         user_id: userId,
         broker,
@@ -276,48 +257,30 @@ function SignalGenerator({ userId }) {
   return (
     <div style={{ marginTop: 30, padding: 20, border: '1px solid #ccc', borderRadius: 8 }}>
       <h3>Generate Signal</h3>
-
       <label>Broker</label>
       <select value={broker} onChange={(e) => setBroker(e.target.value)} style={{ width: '100%', padding: 8, marginBottom: 10 }}>
-        {BROKERS.map((b) => (
-          <option key={b} value={b}>{b}</option>
-        ))}
+        {BROKERS.map((b) => (<option key={b} value={b}>{b}</option>))}
       </select>
-
       <label>Pair</label>
       <select value={pair} onChange={(e) => setPair(e.target.value)} style={{ width: '100%', padding: 8, marginBottom: 10 }}>
-        {Object.keys(allPairs).map((p) => (
-          <option key={p} value={p}>{p}</option>
-        ))}
+        {Object.keys(allPairs).map((p) => (<option key={p} value={p}>{p}</option>))}
       </select>
-
       <label>Timeframe</label>
       <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} style={{ width: '100%', padding: 8, marginBottom: 10 }}>
-        {TIMEFRAMES.map((t) => (
-          <option key={t} value={t}>{t} MIN</option>
-        ))}
+        {TIMEFRAMES.map((t) => (<option key={t} value={t}>{t} MIN</option>))}
       </select>
-
       <button onClick={generateSignal} disabled={loading} style={{ width: '100%', padding: 10, marginTop: 10 }}>
-        {loading ? 'Generating...' : 'Generate Signal'}
+        {loading? 'Generating...' : 'Generate Signal'}
       </button>
-
       {error && <p style={{ color: 'red', marginTop: 15 }}>{error}</p>}
-
       {result && (
         <div style={{ marginTop: 20, padding: 15, background: '#f5f5f5', borderRadius: 6 }}>
-          <h2 style={{ color: result.direction === 'CALL' ? 'green' : result.direction === 'PUT' ? 'red' : 'gray' }}>
-            {result.direction === 'NONE' ? 'No clear signal' : result.direction}
+          <h2 style={{ color: result.direction === 'CALL'? 'green' : result.direction === 'PUT'? 'red' : 'gray' }}>
+            {result.direction === 'NONE'? 'No clear signal' : result.direction}
           </h2>
-          {result.direction !== 'NONE' && <p>Confidence: {result.confidence}%</p>}
-          <ul>
-            {result.reasons.map((r, i) => (
-              <li key={i}>{r}</li>
-            ))}
-          </ul>
-          <p style={{ fontSize: 12, color: '#666', marginTop: 10 }}>
-            Analytical suggestion based on correlated real-market data. Not financial advice.
-          </p>
+          {result.direction!== 'NONE' && <p>Confidence: {result.confidence}%</p>}
+          <ul>{result.reasons.map((r, i) => (<li key={i}>{r}</li>))}</ul>
+          <p style={{ fontSize: 12, color: '#666', marginTop: 10 }}>ICT/SMC based suggestion. Not financial advice.</p>
         </div>
       )}
     </div>
@@ -325,10 +288,7 @@ function SignalGenerator({ userId }) {
 }
 
 function Dashboard({ session }) {
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-  }
-
+  const handleLogout = async () => { await supabase.auth.signOut() }
   return (
     <div style={{ maxWidth: 600, margin: '40px auto', padding: 20, fontFamily: 'sans-serif' }}>
       <h1>GroWiz OTC Dashboard</h1>
@@ -342,24 +302,16 @@ function Dashboard({ session }) {
 function App() {
   const [session, setSession] = useState(null)
   const [loading, setLoading] = useState(true)
-
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setLoading(false)
-    })
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-    })
+    supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setLoading(false) })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => { setSession(session) })
     return () => listener.subscription.unsubscribe()
   }, [])
-
   if (loading) return <div style={{ padding: 40 }}>Loading...</div>
-
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={session ? <Dashboard session={session} /> : <Auth />} />
+        <Route path="/" element={session? <Dashboard session={session} /> : <Auth />} />
       </Routes>
     </BrowserRouter>
   )
