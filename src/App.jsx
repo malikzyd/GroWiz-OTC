@@ -125,10 +125,10 @@ function scoreSignal(candles) {
   let confidence = 0
   const maxPoints = 3
 
-  if (bullPoints >= 1.5 && bullPoints > bearPoints) {
+  if (bullPoints >= 1 && bullPoints > bearPoints) {
     direction = 'CALL'
     confidence = Math.min(95, Math.round((bullPoints / maxPoints) * 100))
-  } else if (bearPoints >= 1.5 && bearPoints > bullPoints) {
+  } else if (bearPoints >= 1 && bearPoints > bullPoints) {
     direction = 'PUT'
     confidence = Math.min(95, Math.round((bearPoints / maxPoints) * 100))
   }
