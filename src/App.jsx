@@ -53,23 +53,23 @@ const CRYPTO_PAIRS = {
 const BROKERS = ['Quotex', 'IQ Option', 'Pocket Option', 'Expert Option']
 const TIMEFRAMES = ['1', '3', '5', '15']
 
-const TF_TO_YAHOO = { '1': '1m', '3': '1m', '5': '5m', '15': '15m' }
+const TF_TO_STOOQ = { '1': '1', '3': '1', '5': '5', '15': '15' }
 const TF_TO_BINANCE = { '1': '1m', '3': '3m', '5': '5m', '15': '15m' }
 
-const YAHOO_MAP = {
-  'EUR/USD': 'EURUSD=X', 'GBP/USD': 'GBPUSD=X', 'USD/JPY': 'USDJPY=X',
-  'USD/CHF': 'USDCHF=X', 'AUD/USD': 'AUDUSD=X', 'USD/CAD': 'USDCAD=X',
-  'NZD/USD': 'NZDUSD=X', 'EUR/GBP': 'EURGBP=X', 'EUR/JPY': 'EURJPY=X',
-  'EUR/CHF': 'EURCHF=X', 'EUR/AUD': 'EURAUD=X', 'EUR/CAD': 'EURCAD=X',
-  'EUR/NZD': 'EURNZD=X', 'GBP/JPY': 'GBPJPY=X', 'GBP/CHF': 'GBPCHF=X',
-  'GBP/AUD': 'GBPAUD=X', 'GBP/CAD': 'GBPCAD=X', 'GBP/NZD': 'GBPNZD=X',
-  'AUD/JPY': 'AUDJPY=X', 'AUD/CHF': 'AUDCHF=X', 'AUD/CAD': 'AUDCAD=X',
-  'AUD/NZD': 'AUDNZD=X', 'CAD/JPY': 'CADJPY=X', 'CAD/CHF': 'CADCHF=X',
-  'NZD/JPY': 'NZDJPY=X', 'NZD/CHF': 'NZDCHF=X', 'CHF/JPY': 'CHFJPY=X',
-  'USD/SGD': 'USDSGD=X', 'USD/HKD': 'USDHKD=X', 'USD/MXN': 'USDMXN=X',
-  'USD/ZAR': 'USDZAR=X', 'USD/TRY': 'USDTRY=X', 'EUR/TRY': 'EURTRY=X',
-  'GBP/TRY': 'GBPTRY=X', 'USD/INR': 'USDINR=X',
-  'XAU/USD': 'GC=F', 'XAG/USD': 'SI=F', 'WTI/USD': 'CL=F',
+const STOOQ_MAP = {
+  'EUR/USD': 'eurusd', 'GBP/USD': 'gbpusd', 'USD/JPY': 'usdjpy',
+  'USD/CHF': 'usdchf', 'AUD/USD': 'audusd', 'USD/CAD': 'usdcad',
+  'NZD/USD': 'nzdusd', 'EUR/GBP': 'eurgbp', 'EUR/JPY': 'eurjpy',
+  'EUR/CHF': 'eurchf', 'EUR/AUD': 'euraud', 'EUR/CAD': 'eurcad',
+  'EUR/NZD': 'eurnzd', 'GBP/JPY': 'gbpjpy', 'GBP/CHF': 'gbpchf',
+  'GBP/AUD': 'gbpaud', 'GBP/CAD': 'gbpcad', 'GBP/NZD': 'gbpnzd',
+  'AUD/JPY': 'audjpy', 'AUD/CHF': 'audchf', 'AUD/CAD': 'audcad',
+  'AUD/NZD': 'audnzd', 'CAD/JPY': 'cadjpy', 'CAD/CHF': 'cadchf',
+  'NZD/JPY': 'nzdjpy', 'NZD/CHF': 'nzdchf', 'CHF/JPY': 'chfjpy',
+  'USD/SGD': 'usdsgd', 'USD/HKD': 'usdhkd', 'USD/MXN': 'usdmxn',
+  'USD/ZAR': 'usdzar', 'USD/TRY': 'usdtry', 'EUR/TRY': 'eurtry',
+  'GBP/TRY': 'gbptry', 'USD/INR': 'usdinr',
+  'XAU/USD': 'xauusd', 'XAG/USD': 'xagusd', 'WTI/USD': 'wtiusd',
 }
 
 // --- ICT / SMC Engine ---
@@ -176,7 +176,7 @@ function scoreSignal(candles) {
   return {direction, confidence, reasons}
 }
 
-// --- Data fetching: Yahoo for Forex/Commodities, Binance for Crypto ---
+// --- Data fetching: Stooq for Forex/Commodities, Binance for Crypto ---
 
 function resampleCandles(candles, tf) {
   if (tf!== '3') return candles
@@ -196,25 +196,26 @@ function resampleCandles(candles, tf) {
 }
 
 async function fetchForexCandles(symbol, tf) {
-  const yahooSym = YAHOO_MAP[symbol]
-  if (!yahooSym) throw new Error('No Yahoo mapping for ' + symbol)
-  const interval = TF_TO_YAHOO[tf] || '1m'
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSym}?interval=${interval}&range=1d`
+  const stooqSym = STOOQ_MAP[symbol]
+  if (!stooqSym) throw new Error('No Stooq mapping for ' + symbol)
+  const interval = TF_TO_STOOQ[tf] || '1'
+  const url = `https://stooq.com/q/d/l/?s=${stooqSym}&i=${interval}`
   const res = await fetch(url)
-  const data = await res.json()
-  const result = data?.chart?.result?.[0]
-  if (!result) throw new Error('Yahoo: no data for ' + symbol)
-  const ts = result.timestamp
-  const q = result.indicators.quote[0]
-  let candles = ts.map((t, i) => ({
-    time: t * 1000,
-    open: q.open[i],
-    high: q.high[i],
-    low: q.low[i],
-    close: q.close[i],
-  })).filter(c => c.open && c.high && c.low && c.close)
+  const text = await res.text()
+  const lines = text.trim().split('\n')
+  if (lines.length < 30) throw new Error('Stooq: no data for ' + symbol)
+  let candles = lines.slice(1).map(line => {
+    const [date, open, high, low, close] = line.split(',')
+    return {
+      time: new Date(date.replace(' ', 'T')).getTime(),
+      open: parseFloat(open),
+      high: parseFloat(high),
+      low: parseFloat(low),
+      close: parseFloat(close),
+    }
+  }).filter(c => c.open && c.high && c.low && c.close)
   candles = resampleCandles(candles, tf)
-  if (candles.length < 25) throw new Error('Not enough Yahoo data')
+  if (candles.length < 25) throw new Error('Not enough Stooq data')
   return candles.slice(-100)
 }
 
