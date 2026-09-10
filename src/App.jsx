@@ -8,20 +8,14 @@ const FOREX_PAIRS = {
   'EUR/USD OTC': 'EUR/USD',
   'GBP/USD OTC': 'GBP/USD',
   'USD/JPY OTC': 'USD/JPY',
-  'EUR/JPY OTC': 'EUR/JPY',
-  'GBP/JPY OTC': 'GBP/JPY',
-  'AUD/USD OTC': 'AUD/USD',
-  'USD/CHF OTC': 'USD/CHF',
-  'NZD/USD OTC': 'NZD/USD',
-  'USD/CAD OTC': 'USD/CAD',
+}
+
+const COMMODITY_PAIRS = {
+  'GOLD OTC': 'XAU/USD',
 }
 
 const CRYPTO_PAIRS = {
   'BTC/USD OTC': 'BTCUSDT',
-  'ETH/USD OTC': 'ETHUSDT',
-  'SOL/USD OTC': 'SOLUSDT',
-  'XRP/USD OTC': 'XRPUSDT',
-  'DOGE/USD OTC': 'DOGEUSDT',
 }
 
 const BROKERS = ['Quotex', 'IQ Option', 'Pocket Option', 'Expert Option']
@@ -131,10 +125,10 @@ function scoreSignal(candles) {
   let confidence = 0
   const maxPoints = 3
 
-  if (bullPoints >= 2 && bullPoints > bearPoints) {
+  if (bullPoints >= 1.5 && bullPoints > bearPoints) {
     direction = 'CALL'
     confidence = Math.min(95, Math.round((bullPoints / maxPoints) * 100))
-  } else if (bearPoints >= 2 && bearPoints > bullPoints) {
+  } else if (bearPoints >= 1.5 && bearPoints > bullPoints) {
     direction = 'PUT'
     confidence = Math.min(95, Math.round((bearPoints / maxPoints) * 100))
   }
@@ -235,7 +229,7 @@ function Auth() {
 }
 
 function SignalGenerator({ userId }) {
-  const allPairs = { ...FOREX_PAIRS, ...CRYPTO_PAIRS }
+  const allPairs = { ...FOREX_PAIRS, ...COMMODITY_PAIRS, ...CRYPTO_PAIRS }
   const [broker, setBroker] = useState(BROKERS[0])
   const [pair, setPair] = useState(Object.keys(allPairs)[0])
   const [timeframe, setTimeframe] = useState('1')
@@ -251,6 +245,8 @@ function SignalGenerator({ userId }) {
       let candles
       if (FOREX_PAIRS[pair]) {
         candles = await fetchForexCandles(FOREX_PAIRS[pair], timeframe)
+      } else if (COMMODITY_PAIRS[pair]) {
+        candles = await fetchForexCandles(COMMODITY_PAIRS[pair], timeframe)
       } else {
         candles = await fetchCryptoCandles(CRYPTO_PAIRS[pair], timeframe)
       }
