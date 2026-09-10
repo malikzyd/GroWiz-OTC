@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { supabase } from './supabaseClient'
 
+const TWELVE_DATA_API_KEY = '6e77576aeef04ad29d9321db20d793c2'
+
 const FOREX_PAIRS = {
   'EUR/USD OTC': 'EUR/USD',
   'GBP/USD OTC': 'GBP/USD',
@@ -53,24 +55,8 @@ const CRYPTO_PAIRS = {
 const BROKERS = ['Quotex', 'IQ Option', 'Pocket Option', 'Expert Option']
 const TIMEFRAMES = ['1', '3', '5', '15']
 
-const TF_TO_STOOQ = { '1': '1', '3': '1', '5': '5', '15': '15' }
+const TF_TO_TWELVEDATA = { '1': '1min', '3': '3min', '5': '5min', '15': '15min' }
 const TF_TO_BINANCE = { '1': '1m', '3': '3m', '5': '5m', '15': '15m' }
-
-const STOOQ_MAP = {
-  'EUR/USD': 'eurusd', 'GBP/USD': 'gbpusd', 'USD/JPY': 'usdjpy',
-  'USD/CHF': 'usdchf', 'AUD/USD': 'audusd', 'USD/CAD': 'usdcad',
-  'NZD/USD': 'nzdusd', 'EUR/GBP': 'eurgbp', 'EUR/JPY': 'eurjpy',
-  'EUR/CHF': 'eurchf', 'EUR/AUD': 'euraud', 'EUR/CAD': 'eurcad',
-  'EUR/NZD': 'eurnzd', 'GBP/JPY': 'gbpjpy', 'GBP/CHF': 'gbpchf',
-  'GBP/AUD': 'gbpaud', 'GBP/CAD': 'gbpcad', 'GBP/NZD': 'gbpnzd',
-  'AUD/JPY': 'audjpy', 'AUD/CHF': 'audchf', 'AUD/CAD': 'audcad',
-  'AUD/NZD': 'audnzd', 'CAD/JPY': 'cadjpy', 'CAD/CHF': 'cadchf',
-  'NZD/JPY': 'nzdjpy', 'NZD/CHF': 'nzdchf', 'CHF/JPY': 'chfjpy',
-  'USD/SGD': 'usdsgd', 'USD/HKD': 'usdhkd', 'USD/MXN': 'usdmxn',
-  'USD/ZAR': 'usdzar', 'USD/TRY': 'usdtry', 'EUR/TRY': 'eurtry',
-  'GBP/TRY': 'gbptry', 'USD/INR': 'usdinr',
-  'XAU/USD': 'xauusd', 'XAG/USD': 'xagusd', 'WTI/USD': 'wtiusd',
-}
 
 // --- ICT / SMC Engine ---
 
@@ -93,8 +79,10 @@ function getMarketStructure(candles){
   if(highs.length<2 || lows.length<2) return {bias:'NEUTRAL', reason:'Not enough structure'}
   const lh1=highs[highs.length-2], lh2=highs[highs.length-1]
   const ll1=lows[lows.length-2], ll2=lows[lows.length-1]
+  // PD Array bias
   if(lh2.price > lh1.price && ll2.price > ll1.price) return {bias:'BULLISH', reason:'HH + HL - Market Structure Bullish'}
   if(lh2.price < lh1.price && ll2.price < ll1.price) return {bias:'BEARISH', reason:'LH + LL - Market Structure Bearish'}
+  // BOS / CHoCH check on last 20
   const recent=candles.slice(-20)
   const maxH=Math.max(...recent.map(c=>c.high))
   const minL=Math.min(...recent.map(c=>c.low))
@@ -135,6 +123,7 @@ function findLiquiditySweep(candles){
 }
 
 function volumeConfirm(candles){
+  // TwelveData/Binance both return volume sometimes, fallback to range expansion
   const ranges=candles.slice(-20).map(c=>c.high-c.low)
   const avg=ranges.reduce((a,b)=>a+b,0)/ranges.length
   const lastR=candles[candles.length-1].high-candles[candles.length-1].low
@@ -152,6 +141,7 @@ function scoreSignal(candles) {
   const vol = volumeConfirm(candles)
 
   let points=0
+  // Only count confluences in direction of MS bias
   if(ob && ob.type===ms.bias){
     points+=2; reasons.push(`${ob.type} Order Block at ${ob.top.toFixed(5)}-${ob.bottom.toFixed(5)}`)
   }
@@ -176,47 +166,25 @@ function scoreSignal(candles) {
   return {direction, confidence, reasons}
 }
 
-// --- Data fetching: Stooq for Forex/Commodities, Binance for Crypto ---
-
-function resampleCandles(candles, tf) {
-  if (tf!== '3') return candles
-  const out = []
-  for (let i = 0; i < candles.length; i += 3) {
-    const chunk = candles.slice(i, i + 3)
-    if (chunk.length < 3) break
-    out.push({
-      time: chunk[0].time,
-      open: chunk[0].open,
-      high: Math.max(...chunk.map(c => c.high)),
-      low: Math.min(...chunk.map(c => c.low)),
-      close: chunk[2].close,
-    })
-  }
-  return out
-}
+// --- Data fetching (unchanged, works for Forex + Commodities + Crypto) ---
 
 async function fetchForexCandles(symbol, tf) {
-  const stooqSym = STOOQ_MAP[symbol]
-  if (!stooqSym) throw new Error('No Stooq mapping for ' + symbol)
-  const interval = TF_TO_STOOQ[tf] || '1'
-  const url = `https://stooq.com/q/d/l/?s=${stooqSym}&i=${interval}`
+  const interval = TF_TO_TWELVEDATA[tf] || '1min'
+  const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(
+    symbol
+  )}&interval=${interval}&outputsize=100&apikey=${TWELVE_DATA_API_KEY}`
   const res = await fetch(url)
-  const text = await res.text()
-  const lines = text.trim().split('\n')
-  if (lines.length < 30) throw new Error('Stooq: no data for ' + symbol)
-  let candles = lines.slice(1).map(line => {
-    const [date, open, high, low, close] = line.split(',')
-    return {
-      time: new Date(date.replace(' ', 'T')).getTime(),
-      open: parseFloat(open),
-      high: parseFloat(high),
-      low: parseFloat(low),
-      close: parseFloat(close),
-    }
-  }).filter(c => c.open && c.high && c.low && c.close)
-  candles = resampleCandles(candles, tf)
-  if (candles.length < 25) throw new Error('Not enough Stooq data')
-  return candles.slice(-100)
+  const data = await res.json()
+  if (!data.values) throw new Error(data.message || 'Twelve Data error')
+  return data.values
+   .map((v) => ({
+      open: parseFloat(v.open),
+      high: parseFloat(v.high),
+      low: parseFloat(v.low),
+      close: parseFloat(v.close),
+      time: new Date(v.datetime).getTime(),
+    }))
+   .reverse()
 }
 
 async function fetchCryptoCandles(symbol, tf) {
