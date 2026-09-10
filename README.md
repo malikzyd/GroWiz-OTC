@@ -1,2 +1,2 @@
 # GroWiz-OTC
-Otc markets signal generator 
+Otc markets signal generator  
